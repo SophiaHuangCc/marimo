@@ -969,17 +969,27 @@ const Node = ({ node, style, dragHandle }: NodeRendererProps<FileTreeNode>) => {
               </DropdownMenuItem>
             </>
           )}
-          {!node.data.isDirectory && !disableFileDownloads && (
+          {!disableFileDownloads && (!node.data.isDirectory || !isWasm()) && (
             <>
               <DropdownMenuSeparator />
               <DropdownMenuItem
+                title={
+                  node.data.isDirectory
+                    ? "Download up to 1 GiB and 10,000 entries. Symbolic links and special files are omitted."
+                    : undefined
+                }
                 onSelect={async () => {
-                  await downloadFile(node.data.path, node.data.name);
+                  await downloadFile(
+                    node.data.path,
+                    node.data.isDirectory
+                      ? `${node.data.name}.zip`
+                      : node.data.name,
+                  );
                 }}
                 data-testid="file-explorer-download-menu-item"
               >
                 <DownloadIcon className={MENU_ITEM_ICON_CLASS} />
-                Download
+                {node.data.isDirectory ? "Download as ZIP" : "Download"}
               </DropdownMenuItem>
             </>
           )}

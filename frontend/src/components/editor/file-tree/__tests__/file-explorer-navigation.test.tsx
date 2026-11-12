@@ -7,6 +7,7 @@ import {
   renderHook,
   screen,
   waitFor,
+  within,
 } from "@testing-library/react";
 import { Provider, createStore } from "jotai";
 import type { ReactNode } from "react";
@@ -15,12 +16,15 @@ import { MockRequestClient } from "@/__mocks__/requests";
 import { ModalProvider } from "@/components/modal/ImperativeModal";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { requestClientAtom } from "@/core/network/requests";
+import { configOverridesAtom } from "@/core/config/config";
+import { isWasm } from "@/core/wasm/utils";
 import type { FileInfo, FileSearchResponse } from "@/core/network/types";
 import { Deferred } from "@/utils/Deferred";
 import { openNotebook } from "@/utils/links";
 import type { FilePath } from "@/utils/paths";
 import { TreeDndProvider } from "../dnd-wrapper";
 import { FileExplorer } from "../file-explorer";
+import { downloadFile } from "../download";
 import { openStateAtom } from "../state";
 import { fileTreeNodeId, RequestingTree } from "../requesting-tree";
 import { useFileSearch } from "../use-file-search";
@@ -28,6 +32,12 @@ import { HOVER_EXPAND_DELAY } from "../use-hover-expand";
 
 vi.mock("../file-viewer", () => ({
   FileViewer: ({ file }: { file: FileInfo }) => <div>Preview: {file.name}</div>,
+}));
+
+vi.mock("../download", () => ({ downloadFile: vi.fn() }));
+vi.mock("@/core/wasm/utils", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/core/wasm/utils")>()),
+  isWasm: vi.fn(() => false),
 }));
 
 vi.mock("@/utils/links", async (importOriginal) => ({
@@ -80,6 +90,7 @@ const wrapper = ({ children }: { children: ReactNode }) => (
 );
 
 beforeEach(() => {
+  vi.mocked(isWasm).mockReturnValue(false);
   localStorage.clear();
   store = createStore();
   client = MockRequestClient.create({
@@ -97,6 +108,44 @@ beforeEach(() => {
 });
 
 describe("file browser navigation", () => {
+  it.each([
+    ["data", "Download as ZIP", "data.zip"],
+    ["notes.txt", "Download", "notes.txt"],
+  ])("downloads %s from its menu", async (name, label, downloadName) => {
+    render(<FileExplorer height={300} />, { wrapper });
+    const row = await screen.findByRole("treeitem", { name });
+    fireEvent.keyDown(within(row).getByTestId("file-explorer-more-button"), {
+      key: "Enter",
+    });
+    fireEvent.click(await screen.findByRole("menuitem", { name: label }));
+    expect(downloadFile).toHaveBeenCalledWith(
+      `/workspace/${name}`,
+      downloadName,
+    );
+  });
+
+  it.each(["disabled", "wasm"])(
+    "hides folder downloads when %s",
+    async (mode) => {
+      if (mode === "disabled") {
+        store.set(configOverridesAtom, {
+          server: { disable_file_downloads: true },
+        });
+      } else {
+        vi.mocked(isWasm).mockReturnValue(true);
+      }
+      render(<FileExplorer height={300} />, { wrapper });
+      const row = await screen.findByRole("treeitem", { name: "data" });
+      fireEvent.keyDown(within(row).getByTestId("file-explorer-more-button"), {
+        key: "Enter",
+      });
+      await screen.findByRole("menuitem", { name: "Copy path" });
+      expect(
+        screen.queryByRole("menuitem", { name: "Download as ZIP" }),
+      ).toBeNull();
+    },
+  );
+
   it("tabs into the notebook action, returns to its row, and exits the tree", async () => {
     client.sendListFiles.mockResolvedValue({
       root: "/workspace",

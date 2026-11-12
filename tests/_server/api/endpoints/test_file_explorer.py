@@ -2,9 +2,11 @@
 from __future__ import annotations
 
 import os
+from io import BytesIO
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import TYPE_CHECKING, cast
+from zipfile import ZipFile
 
 import pytest
 
@@ -650,11 +652,75 @@ def test_download_file_unicode_name(client: TestClient) -> None:
     os.remove(path)
 
 
-def test_download_directory_is_rejected(client: TestClient) -> None:
+def test_download_directory(client: TestClient, tmp_path: Path) -> None:
+    folder = tmp_path / "résults 🎉"
+    (folder / "nested" / "empty").mkdir(parents=True)
+    (folder / "nested" / "data.bin").write_bytes(b"\x00\xffdata")
+    (folder / ".hidden").write_text("hidden")
     response = client.get(
-        "/api/files/download", headers=HEADERS, params={"path": test_dir}
+        "/api/files/download", headers=HEADERS, params={"path": str(folder)}
     )
-    assert response.status_code == 400, response.text
+    assert response.status_code == 200, response.text
+    assert response.headers["content-type"] == "application/zip"
+    assert "filename*=UTF-8''" in response.headers["content-disposition"]
+    assert response.headers["cache-control"] == "no-store"
+    assert response.headers["x-content-type-options"] == "nosniff"
+    with ZipFile(BytesIO(response.content)) as archive:
+        assert {name: archive.read(name) for name in archive.namelist()} == {
+            "résults 🎉/": b"",
+            "résults 🎉/.hidden": b"hidden",
+            "résults 🎉/nested/": b"",
+            "résults 🎉/nested/empty/": b"",
+            "résults 🎉/nested/data.bin": b"\x00\xffdata",
+        }
+
+
+def test_download_empty_directory(client: TestClient, tmp_path: Path) -> None:
+    folder = tmp_path / "empty"
+    folder.mkdir()
+    response = client.get(
+        "/api/files/download", headers=HEADERS, params={"path": str(folder)}
+    )
+    assert response.status_code == 200, response.text
+    with ZipFile(BytesIO(response.content)) as archive:
+        assert archive.namelist() == ["empty/"]
+
+
+@pytest.mark.parametrize("failure", [None, "size", "read"])
+def test_download_directory_cleans_up_archive(
+    client: TestClient,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure: str | None,
+) -> None:
+    from marimo._server.api.endpoints import file_explorer
+    from marimo._server.files.directory_download import (
+        DirectoryDownloadTooLargeError,
+    )
+
+    archive_paths: list[Path] = []
+    write_archive = file_explorer.write_directory_archive
+
+    def track_archive(directory: Path, destination: Path) -> None:
+        archive_paths.append(destination)
+        destination.write_bytes(b"partial archive")
+        if failure == "size":
+            raise DirectoryDownloadTooLargeError("Too large")
+        if failure == "read":
+            raise PermissionError("Cannot read")
+        write_archive(directory, destination)
+
+    monkeypatch.setattr(
+        file_explorer, "write_directory_archive", track_archive
+    )
+    response = client.get(
+        "/api/files/download", headers=HEADERS, params={"path": str(tmp_path)}
+    )
+    assert (
+        response.status_code == {None: 200, "size": 413, "read": 400}[failure]
+    )
+    assert len(archive_paths) == 1
+    assert not archive_paths[0].parent.exists()
 
 
 def test_download_missing_file(client: TestClient) -> None:
@@ -671,15 +737,18 @@ def test_download_requires_path_param(client: TestClient) -> None:
     assert response.status_code == 400, response.text
 
 
-def test_download_requires_auth(client: TestClient) -> None:
+@pytest.mark.parametrize("directory", [False, True])
+def test_download_requires_auth(client: TestClient, directory: bool) -> None:
     response = client.get(
-        "/api/files/download", params={"path": test_file_path}
+        "/api/files/download",
+        params={"path": test_dir if directory else test_file_path},
     )
     assert response.status_code == 401, response.text
 
 
+@pytest.mark.parametrize("directory", [False, True])
 def test_download_disabled_by_config(
-    client: TestClient, user_config_manager: UserConfigStore
+    client: TestClient, user_config_manager: UserConfigStore, directory: bool
 ) -> None:
     user_config_manager.save_config(
         cast(
@@ -687,6 +756,8 @@ def test_download_disabled_by_config(
         )
     )
     response = client.get(
-        "/api/files/download", headers=HEADERS, params={"path": test_file_path}
+        "/api/files/download",
+        headers=HEADERS,
+        params={"path": test_dir if directory else test_file_path},
     )
     assert response.status_code == 403, response.text

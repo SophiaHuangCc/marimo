@@ -3,9 +3,11 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import TYPE_CHECKING
 
 from starlette.authentication import requires
+from starlette.background import BackgroundTask
 from starlette.exceptions import HTTPException
 from starlette.responses import FileResponse
 
@@ -13,6 +15,10 @@ from marimo import _loggers
 from marimo._convert.common.filename import make_download_headers
 from marimo._server.api.deps import AppState
 from marimo._server.api.utils import parse_multipart_request, parse_request
+from marimo._server.files.directory_download import (
+    DirectoryDownloadTooLargeError,
+    write_directory_archive,
+)
 from marimo._server.files.os_file_system import (
     OSFileSystem,
     UploadTooLargeError,
@@ -176,21 +182,27 @@ def download_file(
           required: true
           schema:
             type: string
-          description: Path of the file to download
+          description: Path of the file or directory to download
     responses:
         200:
-            description: Stream the file as an attachment
+            description: Stream the file or directory ZIP as an attachment
             content:
                 application/octet-stream:
                     schema:
                         type: string
                         format: binary
+                application/zip:
+                    schema:
+                        type: string
+                        format: binary
         400:
-            description: Path is missing or is a directory
+            description: Path is missing or the directory could not be archived
         403:
             description: File downloads are disabled
         404:
             description: File not found
+        413:
+            description: Directory exceeds the download size or entry limit
     """
     app_state = AppState(request)
     server_config = app_state.config_manager.get_config().server
@@ -208,8 +220,34 @@ def download_file(
         raise MarimoHTTPException(status_code=400, detail="Missing path")
     file_path = Path(path)
     if file_path.is_dir():
-        raise MarimoHTTPException(
-            status_code=400, detail="Cannot download a directory"
+        temporary_directory = TemporaryDirectory(prefix="marimo-download-")
+        archive_path = Path(temporary_directory.name) / "download.zip"
+        try:
+            write_directory_archive(file_path, archive_path)
+        except DirectoryDownloadTooLargeError as error:
+            temporary_directory.cleanup()
+            raise MarimoHTTPException(
+                status_code=413, detail=str(error)
+            ) from error
+        except OSError as error:
+            temporary_directory.cleanup()
+            raise MarimoHTTPException(
+                status_code=400, detail="Could not archive directory"
+            ) from error
+        except BaseException:
+            temporary_directory.cleanup()
+            raise
+        return FileResponse(
+            archive_path,
+            media_type="application/zip",
+            headers={
+                **make_download_headers(
+                    f"{file_path.resolve().name or 'download'}.zip"
+                ),
+                "X-Content-Type-Options": "nosniff",
+                "Cache-Control": "no-store",
+            },
+            background=BackgroundTask(temporary_directory.cleanup),
         )
     if not file_path.is_file():
         raise MarimoHTTPException(status_code=404, detail="File not found")
