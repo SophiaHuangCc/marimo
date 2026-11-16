@@ -1,0 +1,32 @@
+{
+  "baseline": {
+    "helperType": "undefined",
+    "initial": {
+      "styleHeight": "",
+      "clientHeight": 400,
+      "contentHeight": 640
+    },
+    "afterGrowth": {
+      "styleHeight": "",
+      "clientHeight": 400,
+      "contentHeight": 920
+    },
+    "resizeErrors": [
+      "__resizeIframe is not defined"
+    ]
+  },
+  "fixed": {
+    "helperType": "function",
+    "initial": {
+      "styleHeight": "640px",
+      "clientHeight": 640,
+      "contentHeight": 640
+    },
+    "afterGrowth": {
+      "styleHeight": "920px",
+      "clientHeight": 920,
+      "contentHeight": 920
+    },
+    "resizeErrors": []
+  }
+}
